@@ -1,0 +1,12 @@
+BDF              Vendor Device Class      CXL DVSECs               Why CXL
+0000:a7:02.0     0x8086 0x0db0 0x060400   0x0008,0x0004,0x0003,0x0007 Flex Bus negotiated: io+mem enabled
+0000:a8:00.0     0x1b00 0xc002 0x050210   0x0007,0x0000,0x000a,0x0008,0x0005 DVSEC 0000h (CXL Device) present
+
+Excluded: 7 PCIe function(s) carry CXL DVSECs but do not operate as CXL (all-zero Flex Bus status, i.e. link never negotiated CXL alternate protocol):
+  0000:14:02.0     0x8086 0x0db0 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:14:04.0     0x8086 0x0db1 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:14:06.0     0x8086 0x0db2 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:c3:02.0     0x8086 0x0db0 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:c3:04.0     0x8086 0x0db1 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:c3:06.0     0x8086 0x0db2 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)
+  0000:c3:08.0     0x8086 0x0db3 class=0x060400  CXL DVSECs present but no CXL protocol negotiated and no component registers (Flex Bus Status=0x0000)

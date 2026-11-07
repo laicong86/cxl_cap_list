@@ -68,7 +68,7 @@ Table 8-21 ranges:
       Version Supported   = 2 (deprecated)
       Version Received    = 2 (deprecated)
       No_LL_Reset_Support = 0
-    Link Control/Status   = 0x0000000000000038
+    Link Control/Status   = 0x0000000000000018
       LL_Reset            = 0
       LL_Init_Stall       = 0
       LL_Crd_Stall        = 0

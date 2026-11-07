@@ -442,20 +442,63 @@ Filter 寄存器 reset 默认 **`FFFFFFFFh` = 不做过滤**。Filter ID=1 的�
 
 ---
 
-## 9. 配套代码
+## 9. 如何判定「真的是 CXL 设备」（`--list` 的准确性问题）
+
+**只看到 vendor `1E98h` 的 DVSEC 就认定是 CXL 设备，会误判。**
+
+实测环境里 8 个 Intel 根端口（`8086:0db0`~`0db3`，class `060400`）都带有 DVSEC `0003h/0004h/0007h/0008h`，按「有 CXL DVSEC 就是 CXL 设备」的判据会把它们全部列出来，而实际上只有 `a7:02.0`（`a8:00.0` 的上游端口）真正工作在 CXL 模式。
+
+这是规范允许的：8.1.9 明确要求 **CXL 根端口必须实现 Register Locator DVSEC**，所以空置的根端口天然带这些 DVSEC，与链路是否协商成 CXL 无关。Linux 内核在 `include/uapi/linux/pci_regs.h` 里也特别注明：
+
+> Note that CXL DVSEC id 3 and 7 to be ignored when the CXL link state is "disconnected" (CXL r4.0, sec 9.12.3).
+
+### 判据（按优先级）
+
+| 顺序 | 条件 | 依据 | 结论 |
+|---|---|---|---|
+| 1 | 存在 DVSEC `0000h` | Table 8-2：`0000h` 对 D1/D2/LD/FMLD **Mandatory**，对 P/UP1/DP1/R/USP/DSP **Not Permitted** | **是** CXL 设备 |
+| 2 | `Flex Bus Port Status[2:0] != 0` | 8.2.1.3.3（DVSEC `0007h` + `0Eh`），这三个位由物理层在 alternate protocol 协商**选定 CXL 之后**才置位 | **是**，且链路已协商 |
+| 3 | Component Block `+1000h` 的 header ID = `0001h` | Table 8-23，有效 CXL.cachemem range 的 ID 固定为 `0001h` | **是**，寄存器块真实存在 |
+| — | 以上都不满足 | — | **否**，只是挂了 CXL DVSEC 的 PCIe function |
+
+`Flex Bus Port Status` 低位含义：
+
+| bit | 字段 |
+|---|---|
+| 0 | `Cache_Enabled` |
+| 1 | `IO_Enabled` |
+| 2 | `Mem_Enabled` |
+| 3 | `CXL_Sync_Hdr_Bypass_Enabled` |
+| 4 | `Drift_Buffer_Enabled` |
+| 5 | `CXL 68B Flit and VH Enabled` |
+
+实测对照：
+
+| 设备 | Flex Bus Status | Component header | 判定 |
+|---|---|---|---|
+| `a7:02.0` | `0x0126` → io+mem+68B | `0x0001` | 是（已协商） |
+| `a8:00.0` | — | `0x0001` | 是（有 `0000h`） |
+| 其余 7 个根端口 | `0x0000` | `0x0000` | 否（从未协商，且块未实现） |
+
+注意判据 3 需要 mmap，在无权限或 BAR 未分配时会失败。这种情况按「不构成 CXL 证据」处理，不能当成错误抛出，否则枚举会中断。
+
+---
+
+## 10. 配套代码
 
 `src/cxl_regs.h` — 上面所有偏移/位域的 C 常量，可直接 include。
 `src/cxl_dump.py` — 可运行的用户态提取工具，无第三方依赖。
 
 ```bash
-sudo python3 src/cxl_dump.py            # 枚举所有 CXL 设备
+sudo python3 src/cxl_dump.py            # 枚举真正的 CXL 设备
+sudo python3 src/cxl_dump.py --list     # 同上，并列出被排除的误报设备
 sudo python3 src/cxl_dump.py -d 0000:3b:00.0 -v
 sudo python3 src/cxl_dump.py -d 0000:3b:00.0 --hex 0x1000
 ```
 
 ---
 
-## 8. 参考章节索引
+## 11. 参考章节索引
 
 | 内容 | 章节 |
 |---|---|

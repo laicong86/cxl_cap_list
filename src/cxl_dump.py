@@ -367,7 +367,12 @@ class PciDevice:
         return caps
 
     def find_cxl_dvsecs(self):
-        """Return list of (offset, dvsec_id, revision, length) for CXL DVSECs."""
+        """Return list of dicts for DVSECs whose vendor is CXL (1E98h).
+
+        NOTE: this only proves the vendor field matches. A CXL vendor DVSEC
+        on a device does NOT by itself mean the device operates as CXL --
+        see classify_cxl() for that distinction.
+        """
         found = []
         for cap in self.extended_capabilities():
             if cap["id"] != PCI_EXT_CAP_ID_DVSEC:
@@ -388,6 +393,107 @@ class PciDevice:
                 "length": length,
             })
         return found
+
+    def flexbus_status(self):
+        """Flex Bus Port Status (8.2.1.3.3, DVSEC 0007h + 0Eh).
+
+        Bits [2:0] = Cache_Enabled / IO_Enabled / Mem_Enabled, set by the
+        Flex Bus physical layer only after PCIe alternate-protocol
+        negotiation actually selected CXL. All zero means the link never
+        came up as CXL, even though the DVSEC is present.
+        Returns None when DVSEC 0007h is absent.
+        """
+        dvs = self.flexbus_dvsec()
+        if dvs is None:
+            return None
+        off = dvs["offset"] + 0x0E
+        if off + 2 > len(self.config):
+            return None
+        return u16(self.config, off)
+
+    def component_header_id(self):
+        """ID field of the CXL_Capability_Header at Component block +1000h.
+
+        Valid CXL.cachemem ranges carry ID 0001h (Table 8-23). An
+        all-zero word means the block is not populated.
+        """
+        try:
+            blocks = self.regloc_blocks()
+        except Exception:
+            return None
+        for b in blocks:
+            if b["block_id"] != 0x01:
+                continue
+            try:
+                bar = self.bar_start(b["bir"])
+            except Exception:
+                return None
+            if not bar:
+                return None
+            try:
+                blk = ComponentBlock(self, b["bir"], b["block_offset"], bar)
+                blk.open()
+            except Exception:
+                # mmap can fail for many reasons (BAR unassigned, driver
+                # exclusivity, no permission). Classification must be
+                # non-fatal: treat "cannot read" as "not evidence of CXL".
+                return None
+            try:
+                v = blk.read32(0x1000)
+            finally:
+                blk.close()
+            return None if v is None else (v & 0xFFFF)
+        return None
+
+    def classify_cxl(self):
+        """Decide whether this PCI function actually operates as a CXL device.
+
+        Returns (is_cxl: bool, reason: str).
+
+        A vendor-1E98h DVSEC alone is not sufficient. Real-world example:
+        Intel root ports (8086:0db0..0db3) carry DVSEC 0003/0004/0007/0008
+        even when their links enumerate as plain PCIe, so listing every
+        device with a CXL-vendor DVSEC wrongly reports idle root ports as
+        CXL devices.
+
+        Decision order, all spec-grounded:
+          1. DVSEC 0000h (PCIe DVSEC for CXL Devices, 8.1.3) present
+             -> it is a CXL device. Table 8-2 makes 0000h Mandatory for
+                D1/D2/LD/FMLD and Not-Permitted for ports, so this alone is
+                conclusive.
+          2. Flex Bus Port Status[2:0] != 0 -> CXL protocol was negotiated,
+             so this port/device is operating as CXL.
+          3. Component Register Block +1000h has header ID 0001h -> the
+             CXL.cachemem range is really implemented.
+          Otherwise it is a non-CXL PCIe function that merely advertises
+          CXL DVSECs.
+        """
+        ids = {d["dvsec_id"] for d in self.find_cxl_dvsecs()}
+
+        if DVSEC_DEVICE in ids:
+            return True, "DVSEC 0000h (CXL Device) present"
+
+        st = self.flexbus_status()
+        if st is not None and (st & 0x7):
+            flags = []
+            if st & 0x1:
+                flags.append("cache")
+            if st & 0x2:
+                flags.append("io")
+            if st & 0x4:
+                flags.append("mem")
+            return True, "Flex Bus negotiated: %s enabled" % "+".join(flags)
+
+        if DVSEC_REGLOC in ids:
+            hid = self.component_header_id()
+            if hid == 0x0001:
+                return True, "component register block present (header ID 0001h)"
+
+        if DVSEC_REGLOC in ids:
+            return False, ("CXL DVSECs present but no CXL protocol negotiated "
+                           "and no component registers (Flex Bus Status=0x%04x)"
+                           % (st or 0))
+        return False, "CXL DVSECs present but not a CXL device (no 0000h/0008h)"
 
     def regloc_blocks(self):
         """
@@ -1304,6 +1410,20 @@ def dump_pcie_side(dev, verbose):
     blocks = dev.regloc_blocks()
     devs = dev.find_cxl_dvsecs()
     lines.append("CXL DVSECs found: %d" % len(devs))
+
+    # Warn when the DVSECs exist but the function does not actually operate
+    # as CXL (idle root port). Registers below are then meaningless.
+    if devs:
+        is_cxl, why = dev.classify_cxl()
+        if not is_cxl:
+            lines.append("")
+            lines.append("WARNING: this function does NOT operate as a CXL "
+                         "device - %s" % why)
+            lines.append("         The DVSECs below are the port's static "
+                         "capability advertisement; the Component")
+            lines.append("         Register Block is unpopulated, so the "
+                         "decoded values are not meaningful.")
+
     for d in devs:
         lines.append("  +0x%03x  ID=0x%04x rev=%d len=0x%02x  %s"
                      % (d["offset"], d["dvsec_id"], d["revision"],
@@ -1533,20 +1653,34 @@ def annotate_vendor_aliases(out, dev, blocks):
             pass
 
 
-def enumerate_cxl():
-    """List PCI devices that expose a CXL DVSEC (vendor 1E98)."""
-    found = []
+def scan_cxl_candidates():
+    """Scan sysfs for functions that advertise a CXL-vendor DVSEC.
+
+    Returns (real, rejected) where each item is
+    (bdf, dev, dvsecs, reason).  "real" holds functions that actually
+    operate as CXL; "rejected" holds PCIe functions that merely carry CXL
+    DVSECs (e.g. idle CXL root ports enumerated as plain PCIe).
+    """
+    real, rejected = [], []
     if not os.path.isdir(SYSFS_PCI):
-        return found
+        return real, rejected
     for bdf in sorted(os.listdir(SYSFS_PCI)):
         dev = PciDevice(bdf)
         if not dev.load_config():
-            # Without config access we can still guess from vendor id
+            # Without config access we cannot inspect DVSECs at all
             continue
         dvsecs = dev.find_cxl_dvsecs()
-        if dvsecs:
-            found.append((bdf, dev, dvsecs))
-    return found
+        if not dvsecs:
+            continue
+        is_cxl, reason = dev.classify_cxl()
+        (real if is_cxl else rejected).append((bdf, dev, dvsecs, reason))
+    return real, rejected
+
+
+def enumerate_cxl():
+    """List PCI functions that actually operate as CXL devices."""
+    real, _ = scan_cxl_candidates()
+    return [(bdf, dev, dvs) for bdf, dev, dvs, _ in real]
 
 
 def main():
@@ -1567,27 +1701,44 @@ def main():
             "likely fail\n\n")
 
     targets = []
+    rejected = []
     if args.device:
         targets = [args.device]
     else:
-        found = enumerate_cxl()
-        if not found:
-            print("No CXL device found (no DVSEC with vendor 0x%04x)." % CXL_VENDOR_ID)
-            print("Hints: run as root; check 'lspci -vv | grep -i cxl'.")
+        real, rejected = scan_cxl_candidates()
+        if not real:
+            print("No CXL device found.")
+            if rejected:
+                print("%d PCIe function(s) advertise CXL DVSECs but do not "
+                      "operate as CXL:" % len(rejected))
+                for bdf, _d, _v, why in rejected:
+                    print("  %-16s %s" % (bdf, why))
+            else:
+                print("Hints: run as root; check 'lspci -vv | grep -i cxl'.")
             return 1
-        targets = [bdf for bdf, _, _ in found]
+        targets = [bdf for bdf, _dev, _dvs, _why in real]
 
     if args.list:
-        print("%-16s %-6s %-6s %-10s %s"
-              % ("BDF", "Vendor", "Device", "Class", "CXL DVSECs"))
+        print("%-16s %-6s %-6s %-10s %-24s %s"
+              % ("BDF", "Vendor", "Device", "Class", "CXL DVSECs", "Why CXL"))
         for bdf in targets:
             dev = PciDevice(bdf)
             dev.load_config()
             dvs = dev.find_cxl_dvsecs() if dev.config else []
             ids = ",".join("0x%04x" % d["dvsec_id"] for d in dvs) or "-"
-            print("%-16s 0x%04x 0x%04x 0x%06x   %s"
+            _is, why = dev.classify_cxl() if dev.config else (False, "?")
+            print("%-16s 0x%04x 0x%04x 0x%06x   %-24s %s"
                   % (bdf, dev.vendor or 0, dev.device or 0,
-                     dev.class_code or 0, ids))
+                     dev.class_code or 0, ids, why))
+        if rejected:
+            print("")
+            print("Excluded: %d PCIe function(s) carry CXL DVSECs but do not "
+                  "operate as CXL (all-zero Flex Bus status, i.e. link never "
+                  "negotiated CXL alternate protocol):" % len(rejected))
+            for bdf, dev, _v, why in rejected:
+                print("  %-16s 0x%04x 0x%04x class=0x%06x  %s"
+                      % (bdf, dev.vendor or 0, dev.device or 0,
+                         dev.class_code or 0, why))
         return 0
 
     rc = 0

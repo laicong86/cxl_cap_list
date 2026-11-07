@@ -37,7 +37,8 @@ python3 tests/test_cxl_dump.py
 完整实现了规范规定的两段式发现链：
 
 1. 遍历 PCIe 扩展能力链，找出 DVSEC（Ext Cap ID `0023h`）中 Vendor ID = `1E98h` 的条目
-2. 解析 **Register Locator DVSEC（ID `0008h`）** 得到 `BIR` + 64 KB 对齐偏移
+2. **判定该 function 是否真的以 CXL 模式运行**（详见下节；仅有 CXL DVSEC 不够）
+3. 解析 **Register Locator DVSEC（ID `0008h`）** 得到 `BIR` + 64 KB 对齐偏移
 3. mmap 对应 BAR，定位 64 KB **Component Register Block**
 4. 按 **Table 8-21** 分段：`0x0000` CXL.io / `0x1000` Primary / `0x2000` 扩展池 / `0xE000` ARB-MUX
 5. 在 Primary Range 按 **Table 8-23** 跟随 `CXL_Capability_Header` 指针数组，逐个解出
@@ -64,6 +65,21 @@ python3 tests/test_cxl_dump.py
       0   0x000000000000 0x0          1KB    4    Y    HDM-D
       1   0x000040000000 0x40000000   256B   1    Y    HDM-D
 ```
+
+## 如何判定真的是 CXL 设备
+
+**有 CXL DVSEC ≠ 是 CXL 设备。** 规范 8.1.9 要求 CXL 根端口必须实现 Register Locator DVSEC，所以空置的根端口天然带这些 DVSEC，与链路是否协商成 CXL 无关。
+
+实测某台机器上 8 个 Intel 根端口（`8086:0db0~0db3`）都带 `0003/0004/0007/0008`，但只有 `a7:02.0` 真正工作在 CXL 模式。内核在 `pci_regs.h` 里也注明 DVSEC 3 和 7 在 link state 为 disconnected 时应忽略。
+
+`--list` 的判据，按优先级：
+
+1. 存在 DVSEC **`0000h`** → 是 CXL 设备（Table 8-2 规定它对 D1/D2/LD/FMLD 必选、对端口类设备禁止实现，故此条可一票定论）
+2. `Flex Bus Port Status[2:0] != 0`（DVSEC `0007h` + `0Eh`）→ 是，且链路已协商 CXL
+3. Component Block `+1000h` header ID = `0001h` → 是，寄存器块真实存在
+4. 以上都不满足 → 只是挂了 CXL DVSEC 的 PCIe function，不列入
+
+被排除的设备会用 `--list` 单独列出并说明原因，不会静默丢弃。
 
 ## 三个必须注意的点
 

@@ -355,7 +355,107 @@ def test_cpmu():
                 "M2S unit uses Filter ID 0")
     ok &= check(text.count("Filter[1] Channel") >= 1,
                 "DDR unit uses Filter ID 1")
+
+    ok &= test_classify()
     return ok
+
+
+def build_idle_port_config(flex_status=0x0000):
+    """Config space of a CXL root port whose link never negotiated CXL.
+
+    Mirrors the real-world false positive: Intel root ports carry
+    DVSEC 0003h/0004h/0007h/0008h, but when the link enumerates as plain
+    PCIe the Flex Bus Port Status bits [2:0] read back as zero and the
+    Component Register Block is unpopulated. Such a function must not be
+    reported as a CXL device.
+    """
+    cfg = bytearray(b"\x00" * 4096)
+    struct.pack_into("<H", cfg, 0x00, 0x8086)
+    struct.pack_into("<H", cfg, 0x02, 0x0db0)
+    cfg[0x0B] = 0x04                       # class: PCIe bridge (060400)
+
+    def extcap(off, ver, nxt, length):
+        struct.pack_into("<I", cfg, off,
+                         ((nxt & 0xFFF) << 20) | ((ver & 0xF) << 16)
+                         | C.PCI_EXT_CAP_ID_DVSEC)
+        struct.pack_into("<I", cfg, off + 4,
+                         ((length & 0xFFF) << 20) | ((ver & 0xF) << 16)
+                         | C.CXL_VENDOR_ID)
+
+    # DVSEC 0008h Register Locator: one Component Registers block (id 01h)
+    extcap(0x100, 0, 0x140, 0x14)
+    struct.pack_into("<I", cfg, 0x108, 0x0008)
+    struct.pack_into("<I", cfg, 0x10C, ((0x0 >> 16) << 16) | (0x01 << 8) | 0)
+    struct.pack_into("<I", cfg, 0x110, 0x0)
+
+    # DVSEC 0007h Flex Bus Port, length 0x14 so +0Eh lands inside
+    extcap(0x140, 2, 0x000, 0x14)
+    struct.pack_into("<I", cfg, 0x148, 0x0007)
+    struct.pack_into("<H", cfg, 0x14E, flex_status)
+    return cfg
+
+
+def test_classify():
+    """classify_cxl() must not accept a port that never negotiated CXL."""
+    ok = True
+    print("\n[8] CXL device classification (false-positive guard)")
+
+    # --- idle root port: DVSECs present, Flex Bus status all zero,
+    #     Component block unpopulated (all-zero header) -> rejected
+    idle_block = bytearray(b"\x00" * 0x10000)
+    idle = FakeDev(idle_block,
+                   build_idle_port_config(0x0000),
+                   [(0, 0x2000_0000, 0x2000_FFFF, 0x4)])
+    ok &= check(len(idle.find_cxl_dvsecs()) == 2,
+                "idle port does expose 2 CXL DVSECs")
+    is_cxl, why = idle.classify_cxl()
+    ok &= check(not is_cxl, "idle root port rejected (reason: %s)" % why)
+    ok &= check(idle.flexbus_status() == 0x0000,
+                "idle port Flex Bus Status reads 0x0000")
+    ok &= check(idle.component_header_id() == 0,
+                "idle port component header ID is not 0001h")
+
+    # --- same port but link negotiated: IO+Mem enabled -> accepted
+    active = FakeDev(bytearray(idle_block),
+                     build_idle_port_config(0x0126),
+                     [(0, 0x2000_0000, 0x2000_FFFF, 0x4)])
+    is_cxl, why = active.classify_cxl()
+    ok &= check(is_cxl, "negotiated port accepted (%s)" % why)
+    ok &= check("io" in why and "mem" in why, "reason names io+mem")
+
+    # --- cache-only bits must also count as negotiated
+    cache_only = FakeDev(bytearray(idle_block),
+                         build_idle_port_config(0x0001),
+                         [(0, 0x2000_0000, 0x2000_FFFF, 0x4)])
+    ok &= check(cache_only.classify_cxl()[0], "cache-only negotiation accepted")
+
+    # --- real CXL device: DVSEC 0000h alone is conclusive (Table 8-2)
+    real = FakeDev(build_block(), build_config(),
+                   [(0, 0x1000_0000, 0x1000_3FFF, 0x4),
+                    (2, 0x2000_0000, 0x2000_3FFF, 0x4)])
+    is_cxl, why = real.classify_cxl()
+    ok &= check(is_cxl and "0000h" in why,
+                "DVSEC 0000h alone is conclusive (%s)" % why)
+
+    # --- component header ID 0001h is enough even with Flex Bus status 0
+    live_header = FakeDev(build_block(),
+                          build_idle_port_config(0x0000),
+                          [(0, 0x2000_0000, 0x2000_FFFF, 0x4)])
+    # idle config's block offset is 0, so +1000h hits our populated header
+    is_cxl, why = live_header.classify_cxl()
+    ok &= check(is_cxl and "header ID 0001h" in why,
+                "populated component header accepted (%s)" % why)
+
+    # --- no CXL DVSEC at all -> rejected, and not a false positive either
+    plain_cfg = bytearray(b"\x00" * 4096)
+    plain_cfg[0x0B] = 0x04
+    plain = FakeDev(bytearray(b"\x00" * 0x10000), plain_cfg,
+                    [(0, 0x2000_0000, 0x2000_FFFF, 0x4)])
+    ok &= check(plain.find_cxl_dvsecs() == [], "plain PCIe device has no CXL DVSEC")
+    ok &= check(not plain.classify_cxl()[0], "plain PCIe device rejected")
+
+    return ok
+
 
 
 if __name__ == "__main__":

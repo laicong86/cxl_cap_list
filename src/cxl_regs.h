@@ -116,6 +116,21 @@
 #define CXL_FLEXBUS_CTRL_CACHE_EN   (1u << 0)
 #define CXL_FLEXBUS_CTRL_MEM_EN     (1u << 2)
 
+/* Flex Bus Port Status (8.2.1.3.3, offset 0Eh).
+ * Bits [2:0] are set by the PHY only after PCIe alternate-protocol
+ * negotiation actually selected CXL. All zero means the link enumerated
+ * as plain PCIe even though the CXL DVSEC is present - which is normal for
+ * an idle CXL root port and must NOT be treated as "this is a CXL device".
+ */
+#define CXL_FLEXBUS_STATUS_OFFSET   0x0E
+#define CXL_FLEXBUS_ST_CACHE_EN     (1u << 0)   /* Cache_Enabled */
+#define CXL_FLEXBUS_ST_IO_EN        (1u << 1)   /* IO_Enabled */
+#define CXL_FLEXBUS_ST_MEM_EN       (1u << 2)   /* Mem_Enabled */
+#define CXL_FLEXBUS_ST_SYNC_BYPASS  (1u << 3)   /* CXL_Sync_Hdr_Bypass_Enabled */
+#define CXL_FLEXBUS_ST_DRIFT_BUF    (1u << 4)   /* Drift_Buffer_Enabled */
+#define CXL_FLEXBUS_ST_68B_VH       (1u << 5)   /* CXL 68B Flit and VH Enabled */
+#define CXL_FLEXBUS_ST_MASK_ACTIVE  0x7u        /* any of cache/io/mem */
+
 /* ==========================================================================
  * 2. Component Register Block layout - Table 8-21
  * ========================================================================== */
