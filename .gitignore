@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.o
+*.out
+*.dSYM/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+
+# 本地 AI 工作记忆，不发布
+.workbuddy/

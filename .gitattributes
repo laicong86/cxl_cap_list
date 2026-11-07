@@ -1,0 +1,13 @@
+# 统一用 LF，避免 Windows 上 autocrlf 把 shell 脚本改成 CRLF
+# （CRLF 会让 #!/bin/sh 变成 #!/bin/sh^M，在 Linux 上直接执行失败）
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.h     text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# 二进制
+*.png   binary
+*.pdf   binary
